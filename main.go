@@ -3,13 +3,15 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"time"
 	"os"
 	"regexp"
 	"unicode"
 	"strings"
+	"strconv"
 )
 
-var storage = make(map[string]string)
+var storage = make(map[string]Record)
 
 var set_regexp = regexp.MustCompile(`^set\((\w+),(\w+),(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\((\w+)\)$`)
@@ -18,13 +20,22 @@ const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
+const ERROR_NO_RECORD_FOUND = "No record found"
+const ERROR_RECORD_EXPIRED = "Record expired"
+const ERROR_COMMAND_RUNTIME = "Command execution runtime error"
+const ERROR_TTL_NON_INTEGER = "TTL is not an integer"
 
 type Command struct {
 	instruction string
 	key         string
 	value       string
-	creation    int32
-	ttl         int32
+	ttl         int64
+}
+
+type Record struct {
+	value string
+	timestamp int64
+	ttl		int64
 }
 
 func main() {
@@ -35,9 +46,62 @@ func main() {
 		if error != nil {
 			fmt.Printf("Error: %s\n", error)
 		} else {
-			executeCommand(command)
+			result, error := executeCommand(&command)
+
+			if error != nil {
+				fmt.Printf("Error: %s\n", error)
+			} else {
+				fmt.Printf("%s\n", result)
+			}
 		}
 	}
+}
+
+func executeCommand(cmd *Command) (string, error) {
+	if cmd.instruction == SET_INSTRUCTION {
+		return set(cmd)
+	} else if cmd.instruction == GET_INSTRUCTION {
+		return get(cmd)
+	}
+
+	return cmd.instruction, fmt.Errorf("%s", ERROR_COMMAND_RUNTIME)
+}
+
+func set(cmd *Command) (string, error) {
+	var record Record 
+	var err error
+
+	record.value = cmd.value
+	record.timestamp = time.Now().Unix()
+	record.ttl = int64(cmd.ttl)
+
+	storage[cmd.key] = record
+
+	// fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
+
+	return record.value, err
+}
+
+func get(cmd *Command) (string, error) {
+	var record Record 
+	var err error 
+
+	// fmt.Printf("key: %s\n", cmd.key)
+	// fmt.Printf("value: %s\n", storage[cmd.key].value)
+
+	record, ok := storage[cmd.key]
+
+	if !ok {
+		return cmd.key, fmt.Errorf("%s", ERROR_NO_RECORD_FOUND)
+	}
+	
+	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
+
+	if (record.ttl + record.timestamp) < time.Now().Unix() {
+		return cmd.key, fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
+	}
+
+	return record.value, err
 }
 
 func parseCommand(msg string) (Command, error) {
@@ -53,9 +117,9 @@ func parseCommand(msg string) (Command, error) {
 	matched_get := get_regexp.Match([]byte(msg))
 
 	if matched_set {
-		formCommand(msg, SET_INSTRUCTION, &cmd, set_regexp)
+		err = formCommand(msg, SET_INSTRUCTION, &cmd, set_regexp)
 	} else if matched_get {
-		formCommand(msg, GET_INSTRUCTION, &cmd, get_regexp)
+		err = formCommand(msg, GET_INSTRUCTION, &cmd, get_regexp)
 	} else {
 		err = fmt.Errorf("%s", ERROR_UNRECOGNIZED_COMMAND)
 	}
@@ -63,18 +127,27 @@ func parseCommand(msg string) (Command, error) {
 	return cmd, err
 }
 
-func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.Regexp) {
+func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.Regexp) error {
+	var err error 
+
 	match := pattern.FindStringSubmatch(msg)
-
-	if instruction == SET_INSTRUCTION {
-		cmd.key = match[0]
-		cmd.value = match[1]
-	} else if instruction == GET_INSTRUCTION {
-		cmd.key = match[0]
-	}
-
 	cmd.instruction = instruction
 
+	if instruction == SET_INSTRUCTION {
+		cmd.key = match[1]
+		cmd.value = match[2]
+		cmd.ttl, err = strconv.ParseInt(match[3], 10, 64)
+
+		if err != nil {
+			return fmt.Errorf("%s", ERROR_TTL_NON_INTEGER)
+		}
+		// fmt.Printf("form command. %s. %s = %s\n", cmd.instruction, cmd.key, cmd.value)
+	} else if instruction == GET_INSTRUCTION {
+		cmd.key = match[1]
+		// fmt.Printf("form command. %s. %s\n", cmd.instruction, cmd.key)
+	}
+
+	return err
 }
 
 func stripSpaces(str string) string {
@@ -84,8 +157,4 @@ func stripSpaces(str string) string {
 		}
 		return r
 	}, str)
-}
-
-func executeCommand(cmd Command) {
-	fmt.Println("executing command")
 }
