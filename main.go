@@ -13,7 +13,7 @@ import (
 
 var storage = make(map[string]Record)
 
-var set_regexp = regexp.MustCompile(`^set\((\w+),(\w+),(\d+)\)$`)
+var set_regexp = regexp.MustCompile(`^set\((\w+),\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\((\w+)\)$`)
 
 const SET_INSTRUCTION = "set"
@@ -111,8 +111,6 @@ func parseCommand(msg string) (Command, error) {
 	var cmd Command
 	var err error
 
-	msg = stripSpaces(msg)
-
 	matched_set := set_regexp.Match([]byte(msg))
 	matched_get := get_regexp.Match([]byte(msg))
 
@@ -134,16 +132,16 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 	cmd.instruction = instruction
 
 	if instruction == SET_INSTRUCTION {
-		cmd.key = match[1]
+		cmd.key = stripSpaces(match[1])
 		cmd.value = match[2]
-		cmd.ttl, err = strconv.ParseInt(match[3], 10, 64)
+		cmd.ttl, err = strconv.ParseInt(stripSpaces(match[3]), 10, 64)
 
 		if err != nil {
 			return fmt.Errorf("%s", ERROR_TTL_NON_INTEGER)
 		}
 		// fmt.Printf("form command. %s. %s = %s\n", cmd.instruction, cmd.key, cmd.value)
 	} else if instruction == GET_INSTRUCTION {
-		cmd.key = match[1]
+		cmd.key = stripSpaces(match[1])
 		// fmt.Printf("form command. %s. %s\n", cmd.instruction, cmd.key)
 	}
 
