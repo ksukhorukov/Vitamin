@@ -3,12 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"time"
 	"os"
 	"regexp"
-	"unicode"
-	"strings"
 	"strconv"
+	"strings"
+	"time"
+	"unicode"
 )
 
 var storage = make(map[string]Record)
@@ -33,9 +33,9 @@ type Command struct {
 }
 
 type Record struct {
-	value string
+	value     string
 	timestamp int64
-	ttl		int64
+	ttl       int64
 }
 
 func main() {
@@ -68,7 +68,7 @@ func executeCommand(cmd *Command) (string, error) {
 }
 
 func set(cmd *Command) (string, error) {
-	var record Record 
+	var record Record
 	var err error
 
 	record.value = cmd.value
@@ -83,8 +83,8 @@ func set(cmd *Command) (string, error) {
 }
 
 func get(cmd *Command) (string, error) {
-	var record Record 
-	var err error 
+	var record Record
+	var err error
 
 	// fmt.Printf("key: %s\n", cmd.key)
 	// fmt.Printf("value: %s\n", storage[cmd.key].value)
@@ -94,14 +94,21 @@ func get(cmd *Command) (string, error) {
 	if !ok {
 		return cmd.key, fmt.Errorf("%s", ERROR_NO_RECORD_FOUND)
 	}
-	
+
 	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
 
 	if (record.ttl + record.timestamp) < time.Now().Unix() {
+		// cache invalidation. step 1.
+		delete_key_from_storage(cmd.key)
+
 		return cmd.key, fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	}
 
 	return record.value, err
+}
+
+func delete_key_from_storage(key string) {
+	delete(storage, key)
 }
 
 func parseCommand(msg string) (Command, error) {
@@ -128,7 +135,7 @@ func parseCommand(msg string) (Command, error) {
 }
 
 func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.Regexp) error {
-	var err error 
+	var err error
 
 	match := pattern.FindStringSubmatch(msg)
 	cmd.instruction = instruction
