@@ -9,15 +9,18 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"crypto/sha256"
 )
 
-var storage = make(map[string]Record)
+var storage = make(map[[HASH_SIZE]byte]Record)
 
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 
 const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
+
+const HASH_SIZE = sha256.Size
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_NO_RECORD_FOUND = "No record found"
@@ -27,7 +30,7 @@ const ERROR_TTL_NON_INTEGER = "TTL is not an integer"
 
 type Command struct {
 	instruction string
-	key         string
+	key         [HASH_SIZE]byte
 	value       string
 	ttl         int64
 }
@@ -58,13 +61,16 @@ func main() {
 }
 
 func executeCommand(cmd *Command) (string, error) {
+	var result string 
+	var err error 
+
 	if cmd.instruction == SET_INSTRUCTION {
-		return set(cmd)
+		result, err = set(cmd)
 	} else if cmd.instruction == GET_INSTRUCTION {
-		return get(cmd)
+		result, err = get(cmd)
 	}
 
-	return cmd.instruction, fmt.Errorf("%s", ERROR_COMMAND_RUNTIME)
+	return result, err
 }
 
 func set(cmd *Command) (string, error) {
@@ -92,7 +98,7 @@ func get(cmd *Command) (string, error) {
 	record, ok := storage[cmd.key]
 
 	if !ok {
-		return cmd.key, fmt.Errorf("%s", ERROR_NO_RECORD_FOUND)
+		return fmt.Sprintf("%x", cmd.key), fmt.Errorf("%s", ERROR_NO_RECORD_FOUND)
 	}
 
 	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
@@ -101,13 +107,13 @@ func get(cmd *Command) (string, error) {
 		// cache invalidation. step 1.
 		delete_key_from_storage(cmd.key)
 
-		return cmd.key, fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
+		return fmt.Sprintf("%x", cmd.key), fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	}
 
 	return record.value, err
 }
 
-func delete_key_from_storage(key string) {
+func delete_key_from_storage(key [HASH_SIZE]byte) {
 	delete(storage, key)
 }
 
@@ -139,9 +145,9 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 
 	match := pattern.FindStringSubmatch(msg)
 	cmd.instruction = instruction
+	cmd.key = sha256.Sum256([]byte(strings.TrimSpace(match[1])))
 
 	if instruction == SET_INSTRUCTION {
-		cmd.key = strings.TrimSpace(match[1])
 		cmd.value = strings.TrimSpace(match[2])
 		cmd.ttl, err = strconv.ParseInt(strings.TrimSpace(match[3]), 10, 64)
 
@@ -149,10 +155,7 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 			return fmt.Errorf("%s", ERROR_TTL_NON_INTEGER)
 		}
 		// fmt.Printf("form command. %s. %s = %s\n", cmd.instruction, cmd.key, cmd.value)
-	} else if instruction == GET_INSTRUCTION {
-		cmd.key = match[1]
-		// fmt.Printf("form command. %s. %s\n", cmd.instruction, cmd.key)
-	}
+	} 
 
 	return err
 }
