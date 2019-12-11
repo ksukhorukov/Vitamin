@@ -13,6 +13,7 @@ import (
 )
 
 var storage = make(map[[HASH_SIZE]byte]Record)
+var mcounter int64
 
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
@@ -21,6 +22,9 @@ const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
 
 const HASH_SIZE = sha256.Size
+
+const MEMORY_LIMIT = 10
+const GC_WAITING_TIME = 60 * time.Second
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_NO_RECORD_FOUND = "No record found"
@@ -37,11 +41,13 @@ type Command struct {
 
 type Record struct {
 	value     string
+	size		  int64
 	timestamp int64
 	ttl       int64
 }
 
 func main() {
+	go garbageCollector()
 	input := bufio.NewScanner(os.Stdin)
 	for input.Scan() {
 		msg := input.Text()
@@ -57,6 +63,26 @@ func main() {
 				fmt.Printf("%s\n", result)
 			}
 		}
+	}
+}
+
+func garbageCollector() {
+	paretto := float64(MEMORY_LIMIT * 0.8)
+
+	for {
+		if mcounter >= int64(paretto) {
+			// collect garbage
+			// fmt.Printf("GC. memory usage: %d\n", mcounter)
+			for key, record := range storage {
+				if (record.ttl + record.timestamp) < time.Now().Unix() {
+					delete_key_from_storage(key)
+					mcounter -= record.size
+				}
+			}
+			// fmt.Printf("GC. cleaned memory: %d\n", mcounter)
+		}
+		
+		time.Sleep(GC_WAITING_TIME)
 	}
 }
 
@@ -76,10 +102,15 @@ func executeCommand(cmd *Command) (string, error) {
 func set(cmd *Command) (string, error) {
 	var record Record
 	var err error
+	var size int64
+
+	size = int64(len(cmd.value) + len(cmd.key))
+	mcounter += size
 
 	record.value = cmd.value
 	record.timestamp = time.Now().Unix()
 	record.ttl = int64(cmd.ttl)
+	record.size = size
 
 	storage[cmd.key] = record
 
@@ -106,6 +137,8 @@ func get(cmd *Command) (string, error) {
 	if (record.ttl + record.timestamp) < time.Now().Unix() {
 		// cache invalidation. step 1.
 		delete_key_from_storage(cmd.key)
+
+		mcounter -= record.size
 
 		return fmt.Sprintf("%x", cmd.key), fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	}
