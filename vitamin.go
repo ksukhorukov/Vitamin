@@ -2,14 +2,15 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
-	"os"
+	"log"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
-	"crypto/sha256"
 )
 
 var storage = make(map[[HASH_SIZE]byte]Record)
@@ -25,6 +26,8 @@ const HASH_SIZE = sha256.Size
 
 const MEMORY_LIMIT = 1024 * 1024 //1kb
 const GC_WAITING_TIME = 1 * time.Second
+const SERVER_ADDRESS = "127.0.0.1"
+const SERVER_PORT = 8080
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_NO_RECORD_FOUND = "No record found"
@@ -42,26 +45,50 @@ type Command struct {
 
 type Record struct {
 	value     string
-	size		  int64
+	size      int64
 	timestamp int64
 	ttl       int64
 }
 
 func main() {
 	go garbageCollector()
-	input := bufio.NewScanner(os.Stdin)
+
+	listener, err := net.Listen("tcp", SERVER_ADDRESS+":"+strconv.Itoa(SERVER_PORT))
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		go handleConn(conn)
+	}
+
+}
+
+func handleConn(c net.Conn) {
+	defer c.Close()
+
+	input := bufio.NewScanner(c)
 	for input.Scan() {
 		msg := input.Text()
 		command, error := parseCommand(msg)
 		if error != nil {
 			fmt.Printf("Error: %s\n", error)
+			fmt.Fprintf(c, "Error: %s\n", error)
 		} else {
 			result, error := executeCommand(&command)
 
 			if error != nil {
 				fmt.Printf("Error: %s\n", error)
+				fmt.Fprintf(c, "Error: %s\n", error)
 			} else {
 				fmt.Printf("%s\n", result)
+				fmt.Fprintf(c, "%s\n", result)
 			}
 		}
 	}
@@ -82,7 +109,7 @@ func garbageCollector() {
 			}
 			// fmt.Printf("GC. cleaned memory: %d\n", mcounter)
 		}
-		
+
 		time.Sleep(GC_WAITING_TIME)
 	}
 }
@@ -92,8 +119,8 @@ func recordExpired(record Record) bool {
 }
 
 func executeCommand(cmd *Command) (string, error) {
-	var result string 
-	var err error 
+	var result string
+	var err error
 
 	if cmd.instruction == SET_INSTRUCTION {
 		result, err = set(cmd)
@@ -116,7 +143,7 @@ func set(cmd *Command) (string, error) {
 		key = fmt.Sprintf("%x", cmd.key)
 		err = fmt.Errorf("%s", ERROR_MEMORY_OVERUSAGE)
 		return key, err
-	}	else {
+	} else {
 		mcounter += size
 	}
 
@@ -205,7 +232,7 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 			return fmt.Errorf("%s", ERROR_TTL_NON_INTEGER)
 		}
 		// fmt.Printf("form command. %s. %s = %s\n", cmd.instruction, cmd.key, cmd.value)
-	} 
+	}
 
 	return err
 }
