@@ -23,14 +23,15 @@ const GET_INSTRUCTION = "get"
 
 const HASH_SIZE = sha256.Size
 
-const MEMORY_LIMIT = 10
-const GC_WAITING_TIME = 60 * time.Second
+const MEMORY_LIMIT = 1024 * 1024 //1kb
+const GC_WAITING_TIME = 1 * time.Second
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_NO_RECORD_FOUND = "No record found"
 const ERROR_RECORD_EXPIRED = "Record expired"
 const ERROR_COMMAND_RUNTIME = "Command execution runtime error"
 const ERROR_TTL_NON_INTEGER = "TTL is not an integer"
+const ERROR_MEMORY_OVERUSAGE = "Memory overusage"
 
 type Command struct {
 	instruction string
@@ -74,7 +75,7 @@ func garbageCollector() {
 			// collect garbage
 			// fmt.Printf("GC. memory usage: %d\n", mcounter)
 			for key, record := range storage {
-				if (record.ttl + record.timestamp) < time.Now().Unix() {
+				if recordExpired(record) {
 					delete_key_from_storage(key)
 					mcounter -= record.size
 				}
@@ -84,6 +85,10 @@ func garbageCollector() {
 		
 		time.Sleep(GC_WAITING_TIME)
 	}
+}
+
+func recordExpired(record Record) bool {
+	return (record.ttl + record.timestamp) < time.Now().Unix()
 }
 
 func executeCommand(cmd *Command) (string, error) {
@@ -101,11 +106,19 @@ func executeCommand(cmd *Command) (string, error) {
 
 func set(cmd *Command) (string, error) {
 	var record Record
+	var key string
 	var err error
 	var size int64
 
 	size = int64(len(cmd.value) + len(cmd.key))
-	mcounter += size
+
+	if memoryOveruse(mcounter + size) {
+		key = fmt.Sprintf("%x", cmd.key)
+		err = fmt.Errorf("%s", ERROR_MEMORY_OVERUSAGE)
+		return key, err
+	}	else {
+		mcounter += size
+	}
 
 	record.value = cmd.value
 	record.timestamp = time.Now().Unix()
@@ -117,6 +130,10 @@ func set(cmd *Command) (string, error) {
 	// fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
 	return record.value, err
+}
+
+func memoryOveruse(size int64) bool {
+	return size > MEMORY_LIMIT
 }
 
 func get(cmd *Command) (string, error) {
@@ -134,7 +151,7 @@ func get(cmd *Command) (string, error) {
 
 	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
 
-	if (record.ttl + record.timestamp) < time.Now().Unix() {
+	if recordExpired(record) {
 		// cache invalidation. step 1.
 		delete_key_from_storage(cmd.key)
 

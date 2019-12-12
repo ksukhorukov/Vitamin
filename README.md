@@ -5,5 +5,6 @@ TODO:
 [+] keys hashing
 [-] garbage collector
 	[+] naive approach
-	[-] paretto rule
+	[+] paretto rule
+	[+] restrict memory overusage
 [-] quorum
