@@ -18,7 +18,7 @@ import (
 var storage = make(map[[HASH_SIZE]byte]Record)
 var mcounter int64
 
-var peers = []string{ "127.0.0.1:8081" }
+var peers = []string{ "127.0.0.1:8080" }
 var peers_connection = make(map[string]net.Conn)
 
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
@@ -37,7 +37,7 @@ const GC_WAITING_TIME = 1 * time.Second
 const PEERS_CONNECTION_WAITING_TIME = 5 * time.Second
 const PEERS_CONNECTION_RETRIES = 5
 const SERVER_ADDRESS = "127.0.0.1"
-const SERVER_PORT = 8080
+const SERVER_PORT = 8081
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_RECORD_NOT_FOUND = "Record not found"
@@ -160,7 +160,7 @@ func connectPeers() {
 				log.Println(err)
 				time.Sleep(PEERS_CONNECTION_WAITING_TIME)
 			} else {
-				fmt.Println("Connected to ", conn.RemoteAddr().String())
+				fmt.Println("Connected to %s", conn.RemoteAddr().String())
 				peers_connection[socket] = conn
 				break
 			}
