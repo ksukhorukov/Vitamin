@@ -13,7 +13,7 @@ import (
 	"unicode"
 )
 
-var storage = make(map[[HASH_SIZE]byte]Record)
+var storage = make(map[string]Record)
 var mcounter int64
 
 var peers = []string{ "127.0.0.1:8081" }
@@ -22,7 +22,7 @@ var peers_connection = make(map[string]net.Conn)
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 var network_get_regexp = regexp.MustCompile(`^network_get\(\"(.*)\",\"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5})\"\)$`)
-var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
+var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
 
 const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
@@ -48,10 +48,11 @@ const ERROR_MEMORY_OVERUSAGE = "Memory overusage"
 type Command struct {
 	instruction string
 	socket      string
-	key         [HASH_SIZE]byte
+	key         string
 	value       string
 	timestamp int64
 	ttl         int64
+	size 				int64
 }
 
 type Record struct {
@@ -95,6 +96,7 @@ func handleConn(c net.Conn) {
 		msg := input.Text()
 		fmt.Printf("Message: %s\n", msg)
 		command, error := parseCommand(msg)
+		fmt.Printf("Command parsed.")
 		if error != nil {
 			fmt.Printf("Error: %s\n", error)
 			fmt.Fprintf(c, "Error: %s\n", error)
@@ -148,6 +150,8 @@ func executeCommand(cmd *Command) (string, error) {
 	} else if cmd.instruction == NETWORK_GET_INSTRUCTION {
 		fmt.Printf("network get instruction received\n")
 		networkGet(cmd)
+	} else if cmd.instruction == NETWORK_GET_SUCCESS_RESPONSE {
+		networkGetResponse(cmd)
 	}
 
 	return result, err
@@ -170,6 +174,13 @@ func connectPeers() {
 	}
 }
 
+func networkGetResponse(cmd *Command) (string, error) {
+	var err error
+	fmt.Printf("networkGetResponse function.\n")
+	fmt.Printf("command: %s %s %d %d %d\n", cmd.key, cmd.value, cmd.size, cmd.timestamp, cmd.ttl)
+	return cmd.value, err
+}
+
 func networkGet(cmd *Command) {
 	var record Record
 
@@ -179,28 +190,30 @@ func networkGet(cmd *Command) {
 
 	record, ok := storage[cmd.key]
 
-	if !ok {
+	if ok {
+		fmt.Printf("networkGet. Record found\n")
+		fmt.Printf("Record: %s %s %d %d %d", cmd.key, record.value, record.size, record.timestamp, record.ttl)
+		fmt.Fprintf(peers_connection[cmd.socket], "%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)		
+	} else {
 		fmt.Printf("networkGet. Error: record not found\n")
 		fmt.Fprintf(peers_connection[cmd.socket], "%s", ERROR_RECORD_NOT_FOUND)
-	} else {
-		fmt.Printf("networkGet. Record found\n")
-		fmt.Printf("Record: %s %d %d %d", record.value, record.size, record.timestamp, record.ttl)
-		fmt.Fprintf(peers_connection[cmd.socket], "%s(%s,%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, record.value, record.size, record.timestamp, record.ttl)
 	}
 }
 
 func broadcastGet(cmd *Command) (Record, error) {
 	var record Record
-	var records []Record
+	//var records []Record
 	var result Record
 	var data string
+	var err error
+	var response string 
 
 	for _, connection := range(peers_connection) {
-		fmt.Printf("broadcast get. key = %x\n", cmd.key)
-		fmt.Fprintf(connection, "%s(\"%s\",\"%s\")\n", NETWORK_GET_INSTRUCTION, string(cmd.key[:]), socketAddress(SERVER_ADDRESS, SERVER_PORT))
+		fmt.Printf("broadcast get. key = %s\n", cmd.key)
+		fmt.Fprintf(connection, "%s(\"%s\",\"%s\")\n", NETWORK_GET_INSTRUCTION, cmd.key, socketAddress(SERVER_ADDRESS, SERVER_PORT))
 		fmt.Printf("network_get instruciton\n")
 		 
-		response, err := bufio.NewReader(connection).ReadString('\n')
+		response, err = bufio.NewReader(connection).ReadString('\n')
 
 		if err != nil {
 			fmt.Errorf("%s\n", err)
@@ -226,13 +239,14 @@ func broadcastGet(cmd *Command) (Record, error) {
 				record.timestamp = timestamp
 				record.ttl = ttl
 
-				records = append(records, record)		
+				//records = append(records, record)		
+				return record, err
 			}
 		}
 
 	}
 
-	result, err := findLatestRecord(records)
+	//result, err := findLatestRecord(records)
 
 	return result, err
 }
@@ -265,7 +279,7 @@ func set(cmd *Command) (string, error) {
 	size = int64(len(cmd.value) + len(cmd.key))
 
 	if memoryOveruse(mcounter + size) {
-		key = fmt.Sprintf("%x", cmd.key)
+		key = cmd.key
 		err = fmt.Errorf("%s", ERROR_MEMORY_OVERUSAGE)
 		return key, err
 	} else {
@@ -279,7 +293,7 @@ func set(cmd *Command) (string, error) {
 
 	storage[cmd.key] = record
 
-	fmt.Printf("set command. %x = %s\n", cmd.key, storage[cmd.key].value)
+	fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
 	return record.value, err
 }
@@ -302,11 +316,12 @@ func get(cmd *Command) (string, error) {
 		record, err = broadcastGet(cmd)
 		
 		if err != nil {
-			return fmt.Sprintf("%x", cmd.key), fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)		
+			return cmd.key, fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)		
 		}
 	}
 	
 	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
+	fmt.Printf("Record found after broadcast: %s %s %d %d %d\n", cmd.key, record.value, record.size, record.timestamp, record.ttl)
 
 	if recordExpired(record) {
 		// cache invalidation. step 1.
@@ -314,13 +329,13 @@ func get(cmd *Command) (string, error) {
 
 		mcounter -= record.size
 
-		return fmt.Sprintf("%x", cmd.key), fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
+		return cmd.key, fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	}
 
 	return record.value, err
 }
 
-func deleteKeyFromStorage(key [HASH_SIZE]byte) {
+func deleteKeyFromStorage(key string) {
 	delete(storage, key)
 }
 
@@ -336,6 +351,7 @@ func parseCommand(msg string) (Command, error) {
 	matched_set := set_regexp.Match([]byte(msg))
 	matched_get := get_regexp.Match([]byte(msg))
 	matched_netowork_get := network_get_regexp.Match([]byte(msg))
+	matched_network_get_response := network_get_success_response_regexp.Match([]byte(msg))
 
 	fmt.Printf("parse command. message: %s\n", msg)
 
@@ -346,6 +362,9 @@ func parseCommand(msg string) (Command, error) {
 	} else if matched_netowork_get {
 		fmt.Printf("matched_netowork_get\n")
 		err = formCommand(msg, NETWORK_GET_INSTRUCTION, &cmd, network_get_regexp)
+	} else if matched_network_get_response {
+		err = formCommand(msg, NETWORK_GET_SUCCESS_RESPONSE, &cmd, network_get_success_response_regexp)
+		fmt.Printf("matched network get success response")
 	} else {
 		err = fmt.Errorf("%s", ERROR_UNRECOGNIZED_COMMAND)
 	}
@@ -361,14 +380,22 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 
 	fmt.Printf("form command. %s\n", cmd.instruction)
 
-	if instruction != NETWORK_GET_INSTRUCTION {
-		cmd.key = sha256.Sum256([]byte(strings.TrimSpace(match[1])))	
+	if instruction != NETWORK_GET_INSTRUCTION  && instruction != NETWORK_GET_SUCCESS_RESPONSE {
+		cmd.key = fmt.Sprintf("%x",sha256.Sum256([]byte(strings.TrimSpace(match[1]))))
 	} else if instruction == NETWORK_GET_INSTRUCTION {
 		//cmd.key = [32]byte(match[1])
 		fmt.Printf("form command. network_get instruction\n")
-		copy(cmd.key[:], match[1])
+		cmd.key = match[1]
 		cmd.socket = match[2]
 		fmt.Printf("cmd key %s. cmd socket %s\n", cmd.key, cmd.socket)
+	} else if instruction == NETWORK_GET_SUCCESS_RESPONSE {
+		fmt.Printf("form command. network_get_success_response\n")
+		cmd.key = match[1]
+		cmd.value = match[2]
+		cmd.size, err =   strconv.ParseInt(match[3], 10, 64)
+		cmd.timestamp, err = strconv.ParseInt(match[4], 10, 64)
+		cmd.ttl, err = strconv.ParseInt(match[5], 10, 64)
+
 	}
 	
 	if instruction == SET_INSTRUCTION {
