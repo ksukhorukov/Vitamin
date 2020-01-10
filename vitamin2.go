@@ -17,11 +17,10 @@ var storage = make(map[string]Record)
 var mcounter int64
 
 var peers = []string{ "127.0.0.1:8080" }
-var peers_connection = make(map[string]net.Conn)
 
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
-var network_get_regexp = regexp.MustCompile(`^network_get\(\"(.*)\",\"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5})\"\)$`)
+var network_get_regexp = regexp.MustCompile(`^network_get\(\"(\w+)\"\)$`)
 var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
 
 const SET_INSTRUCTION = "set"
@@ -35,6 +34,7 @@ const MEMORY_LIMIT = 1024 * 1024 //1kb
 const GC_WAITING_TIME = 1 * time.Second
 const PEERS_CONNECTION_WAITING_TIME = 5 * time.Second
 const PEERS_CONNECTION_RETRIES = 5
+const GET_REQUESTS_LIMIT = 3
 const SERVER_ADDRESS = "127.0.0.1"
 const SERVER_PORT = 8081
 
@@ -47,7 +47,6 @@ const ERROR_MEMORY_OVERUSAGE = "Memory overusage"
 
 type Command struct {
 	instruction string
-	socket      string
 	key         string
 	value       string
 	timestamp int64
@@ -64,7 +63,6 @@ type Record struct {
 
 func main() {
 	go garbageCollector()
-	go connectPeers()
 
 	listener, err := net.Listen("tcp", socketAddress(SERVER_ADDRESS, SERVER_PORT))
 
@@ -88,8 +86,11 @@ func socketAddress(host string, port int) string {
 	return SERVER_ADDRESS + ":" + strconv.Itoa(SERVER_PORT)
 }
 
-func handleConn(c net.Conn) {
+func handleConn(c net.Conn) (string, error) {
 	defer c.Close()
+
+	var response string
+	var err error
 
 	input := bufio.NewScanner(c)
 	for input.Scan() {
@@ -98,20 +99,25 @@ func handleConn(c net.Conn) {
 		command, error := parseCommand(msg)
 		fmt.Printf("Command parsed.")
 		if error != nil {
+			err = error
 			fmt.Printf("Error: %s\n", error)
 			fmt.Fprintf(c, "Error: %s\n", error)
 		} else {
 			result, error := executeCommand(&command)
 
 			if error != nil {
+				err = error
 				fmt.Print("Error: %s\n", error)
 				fmt.Fprintf(c, "Error: %s\n", error)
 			} else {
+				response = result
 				fmt.Printf("%s\n", result)
 				fmt.Fprintf(c, "%s\n", result)
 			}
 		}
 	}
+
+	return response, err
 }
 
 func garbageCollector() {
@@ -146,7 +152,7 @@ func executeCommand(cmd *Command) (string, error) {
 	if cmd.instruction == SET_INSTRUCTION {
 		result, err = set(cmd)
 	} else if cmd.instruction == GET_INSTRUCTION {
-		result, err = get(cmd)
+		result, err = get(cmd, GET_REQUESTS_LIMIT)
 	} else if cmd.instruction == NETWORK_GET_INSTRUCTION {
 		fmt.Printf("network get instruction received\n")
 		result, err = networkGet(cmd)
@@ -157,32 +163,44 @@ func executeCommand(cmd *Command) (string, error) {
 	return result, err
 }
 
-func connectPeers() {
-	for _, socket := range(peers) {
-		for i := 0; i < PEERS_CONNECTION_RETRIES; i++ {
-			conn, err := net.Dial("tcp", socket)
+func connectPeer(socket string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", socket)
 
-			if err != nil {
-				log.Println(err)
-				time.Sleep(PEERS_CONNECTION_WAITING_TIME)
-			} else {
-				fmt.Println("Connected to ", conn.RemoteAddr().String())
-				peers_connection[socket] = conn
-				break
-			}
-		}
+	if err != nil {
+		log.Println(err)
+	} else {
+		fmt.Println("Connected to ", conn.RemoteAddr().String())
 	}
+
+	return conn, err
 }
 
-func networkGetResponse(cmd *Command) (string, error) {
+func networkGetResponse(cmd *Command)  (string, error) {
 	var err error
+	var record Record
+
 	fmt.Printf("networkGetResponse function.\n")
 	fmt.Printf("command: %s %s %d %d %d\n", cmd.key, cmd.value, cmd.size, cmd.timestamp, cmd.ttl)
-	return cmd.value, err
+
+	record.value = cmd.value
+	record.size = cmd.size 
+	record.timestamp = cmd.timestamp
+	record.ttl = cmd.ttl
+
+	if recordExpired(record) {
+		fmt.Printf("recordExpired. netwoekGetResponse\n")
+		err = fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
+	} else {
+		storage[cmd.key] = record
+	}
+
+	return record.value, err
 }
 
-func networkGet(cmd *Command) {
+func networkGet(cmd *Command) (string, error) {
 	var record Record
+	var result string
+	var err error
 
 	fmt.Printf("network get received\n")
 	fmt.Printf("key: %s\n", cmd.key)
@@ -193,62 +211,54 @@ func networkGet(cmd *Command) {
 	if ok {
 		fmt.Printf("networkGet. Record found\n")
 		fmt.Printf("Record: %s %s %d %d %d", cmd.key, record.value, record.size, record.timestamp, record.ttl)
-		fmt.Fprintf(peers_connection[cmd.socket], "%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)		
+		result = fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)		
 	} else {
 		fmt.Printf("networkGet. Error: record not found\n")
-		fmt.Fprintf(peers_connection[cmd.socket], "%s", ERROR_RECORD_NOT_FOUND)
+		err = fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)
 	}
+
+	return result, err
 }
 
-func broadcastGet(cmd *Command) (Record, error) {
-	var record Record
-	//var records []Record
-	var result Record
-	var data string
-	var err error
-	var response string 
+func broadcastGet(cmd *Command) (string, error) {
+	var result string
+	var error error
+	var connection net.Conn
+	var broadcast_get_response_cmd Command
 
-	for _, connection := range(peers_connection) {
+	fmt.Printf("%s\n","Starting broadcast")
+	for _, socket := range(peers) {
+		connection, error = connectPeer(socket)
+
+		if error != nil {
+			log.Println(error)
+			continue
+		}
+
 		fmt.Printf("broadcast get. key = %s\n", cmd.key)
-		fmt.Fprintf(connection, "%s(\"%s\",\"%s\")\n", NETWORK_GET_INSTRUCTION, cmd.key, socketAddress(SERVER_ADDRESS, SERVER_PORT))
+		fmt.Fprintf(connection, "%s(\"%s\")\n", NETWORK_GET_INSTRUCTION, cmd.key)
 		fmt.Printf("network_get instruciton\n")
-		 
-		response, err = bufio.NewReader(connection).ReadString('\n')
 
-		if err != nil {
-			fmt.Errorf("%s\n", err)
+		result, error = bufio.NewReader(connection).ReadString('\n')
+
+		connection.Close()
+
+		if error != nil {
+			log.Println(error)
 		} else {
-				//io.Copy(&response, connection)
-			fmt.Printf("copy response from connection\n")
-			fmt.Printf("Response: %s\n", response)
-			
-			data = fmt.Sprintf("%s", response)
-			fmt.Printf("data: %s\n", data)
-			get_response_match := network_get_success_response_regexp.Match([]byte(data))
-
-			if get_response_match {
-				fmt.Printf("get response match")
-				get_response_data := network_get_success_response_regexp.FindStringSubmatch(data)
-				value := get_response_data[1]
-				size, _ := strconv.ParseInt(get_response_data[2], 10, 64)
-				timestamp, _ := strconv.ParseInt(get_response_data[3], 10, 64)
-				ttl, _ := strconv.ParseInt(get_response_data[4], 10, 64)
-
-				record.value = value
-				record.size = size
-				record.timestamp = timestamp
-				record.ttl = ttl
-
-				//records = append(records, record)		
-				return record, err
+			broadcast_get_response_cmd, error = parseCommand(result)
+			if error != nil {
+				log.Println(error)
+			} else {
+				fmt.Printf("broadcastGet. command parsed. executing %s\n", broadcast_get_response_cmd.instruction)
+				return executeCommand(&broadcast_get_response_cmd)
 			}
 		}
 
+		result, error = "", nil
 	}
-
-	//result, err := findLatestRecord(records)
-
-	return result, err
+	
+	return result, error
 }
 
 func findLatestRecord(records []Record) (Record, error) {
@@ -302,7 +312,7 @@ func memoryOveruse(size int64) bool {
 	return size > MEMORY_LIMIT
 }
 
-func get(cmd *Command) (string, error) {
+func get(cmd *Command, attempts int) (string, error) {
 	var record Record
 	var err error
 
@@ -312,11 +322,12 @@ func get(cmd *Command) (string, error) {
 	record, ok := storage[cmd.key]
 
 	if !ok {
-
-		record, err = broadcastGet(cmd)
-		
-		if err != nil {
-			return cmd.key, fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)		
+		fmt.Printf("%s\n", "No key in storage")
+		fmt.Printf("%d network get requests attempts\n", attempts)
+		if attempts > 0 {	
+			fmt.Printf("%s\n", "Starting broadcast")
+			broadcastGet(cmd)
+			return get(cmd, attempts-1)
 		}
 	}
 	
@@ -325,11 +336,12 @@ func get(cmd *Command) (string, error) {
 
 	if recordExpired(record) {
 		// cache invalidation. step 1.
+		fmt.Printf("recordExpired. Get request\n")
 		deleteKeyFromStorage(cmd.key)
 
 		mcounter -= record.size
 
-		return cmd.key, fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
+		return cmd.key, fmt.Errorf("%s\n", ERROR_RECORD_EXPIRED)
 	}
 
 	return record.value, err
@@ -386,8 +398,7 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 		//cmd.key = [32]byte(match[1])
 		fmt.Printf("form command. network_get instruction\n")
 		cmd.key = match[1]
-		cmd.socket = match[2]
-		fmt.Printf("cmd key %s. cmd socket %s\n", cmd.key, cmd.socket)
+		fmt.Printf("cmd key %s.\n", cmd.key)
 	} else if instruction == NETWORK_GET_SUCCESS_RESPONSE {
 		fmt.Printf("form command. network_get_success_response\n")
 		cmd.key = match[1]
