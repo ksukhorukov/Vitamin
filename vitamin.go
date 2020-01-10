@@ -22,6 +22,7 @@ var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 var network_get_regexp = regexp.MustCompile(`^network_get\(\"(\w+)\"\)$`)
 var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
+var response_error_regexp =  regexp.MustCompile(`^Error: (.+)$`)
 
 const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
@@ -34,7 +35,6 @@ const MEMORY_LIMIT = 1024 * 1024 //1kb
 const GC_WAITING_TIME = 1 * time.Second
 const PEERS_CONNECTION_WAITING_TIME = 5 * time.Second
 const PEERS_CONNECTION_RETRIES = 5
-const GET_REQUESTS_LIMIT = 3
 const SERVER_ADDRESS = "127.0.0.1"
 const SERVER_PORT = 8080
 
@@ -86,11 +86,8 @@ func socketAddress(host string, port int) string {
 	return SERVER_ADDRESS + ":" + strconv.Itoa(SERVER_PORT)
 }
 
-func handleConn(c net.Conn) (string, error) {
+func handleConn(c net.Conn) {
 	defer c.Close()
-
-	var response string
-	var err error
 
 	input := bufio.NewScanner(c)
 	for input.Scan() {
@@ -99,25 +96,20 @@ func handleConn(c net.Conn) (string, error) {
 		command, error := parseCommand(msg)
 		fmt.Printf("Command parsed.")
 		if error != nil {
-			err = error
 			fmt.Printf("Error: %s\n", error)
 			fmt.Fprintf(c, "Error: %s\n", error)
 		} else {
 			result, error := executeCommand(&command)
 
 			if error != nil {
-				err = error
-				fmt.Print("Error: %s\n", error)
+				fmt.Printf("Error: %s\n", error)
 				fmt.Fprintf(c, "Error: %s\n", error)
 			} else {
-				response = result
 				fmt.Printf("%s\n", result)
 				fmt.Fprintf(c, "%s\n", result)
 			}
 		}
 	}
-
-	return response, err
 }
 
 func garbageCollector() {
@@ -152,7 +144,7 @@ func executeCommand(cmd *Command) (string, error) {
 	if cmd.instruction == SET_INSTRUCTION {
 		result, err = set(cmd)
 	} else if cmd.instruction == GET_INSTRUCTION {
-		result, err = get(cmd, GET_REQUESTS_LIMIT)
+		result, err = get(cmd)
 	} else if cmd.instruction == NETWORK_GET_INSTRUCTION {
 		fmt.Printf("network get instruction received\n")
 		result, err = networkGet(cmd)
@@ -189,6 +181,7 @@ func networkGetResponse(cmd *Command)  (string, error) {
 
 	if recordExpired(record) {
 		fmt.Printf("recordExpired. netwoekGetResponse\n")
+		mcounter -= record.size
 		err = fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	} else {
 		storage[cmd.key] = record
@@ -198,7 +191,6 @@ func networkGetResponse(cmd *Command)  (string, error) {
 }
 
 func networkGet(cmd *Command) (string, error) {
-	var record Record
 	var result string
 	var err error
 
@@ -258,7 +250,7 @@ func broadcastGet(cmd *Command) (string, error) {
 		result, error = "", nil
 	}
 	
-	return result, error
+	return result, fmt.Errorf(ERROR_RECORD_NOT_FOUND)
 }
 
 func findLatestRecord(records []Record) (Record, error) {
@@ -312,7 +304,7 @@ func memoryOveruse(size int64) bool {
 	return size > MEMORY_LIMIT
 }
 
-func get(cmd *Command, attempts int) (string, error) {
+func get(cmd *Command) (string, error) {
 	var record Record
 	var err error
 
@@ -323,17 +315,10 @@ func get(cmd *Command, attempts int) (string, error) {
 
 	if !ok {
 		fmt.Printf("%s\n", "No key in storage")
-		fmt.Printf("%d network get requests attempts\n", attempts)
-		if attempts > 0 {	
-			fmt.Printf("%s\n", "Starting broadcast")
-			broadcastGet(cmd)
-			return get(cmd, attempts-1)
-		}
+		fmt.Printf("%s\n", "Starting broadcast")
+		return broadcastGet(cmd)
 	}
-	
-	// fmt.Printf("timestamp: %d. ttl: %d.\n", record.timestamp, record.ttl)
-	fmt.Printf("Record found after broadcast: %s %s %d %d %d\n", cmd.key, record.value, record.size, record.timestamp, record.ttl)
-
+		
 	if recordExpired(record) {
 		// cache invalidation. step 1.
 		fmt.Printf("recordExpired. Get request\n")
@@ -364,6 +349,7 @@ func parseCommand(msg string) (Command, error) {
 	matched_get := get_regexp.Match([]byte(msg))
 	matched_netowork_get := network_get_regexp.Match([]byte(msg))
 	matched_network_get_response := network_get_success_response_regexp.Match([]byte(msg))
+	matched_response_error := response_error_regexp.Match([]byte(msg))
 
 	fmt.Printf("parse command. message: %s\n", msg)
 
@@ -377,6 +363,9 @@ func parseCommand(msg string) (Command, error) {
 	} else if matched_network_get_response {
 		err = formCommand(msg, NETWORK_GET_SUCCESS_RESPONSE, &cmd, network_get_success_response_regexp)
 		fmt.Printf("matched network get success response")
+	} else if matched_response_error {
+		fmt.Printf("matched response error")
+		err = fmt.Errorf(msg)
 	} else {
 		err = fmt.Errorf("%s", ERROR_UNRECOGNIZED_COMMAND)
 	}
