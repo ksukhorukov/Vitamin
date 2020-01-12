@@ -1,4 +1,8 @@
-./vitamin
-./vitamin2
-./vitamin2.go
-./build.sh
+vitamin
+vitamin2
+vitamin2.go
+emit_log.go
+receive_logs.go
+emit_log
+receive_logs
+build.sh

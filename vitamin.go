@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"github.com/streadway/amqp"
 )
 
 var storage = make(map[string]Record)
@@ -23,6 +24,10 @@ var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 var network_get_regexp = regexp.MustCompile(`^network_get\(\"(\w+)\"\)$`)
 var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
 var response_error_regexp =  regexp.MustCompile(`^Error: (.+)$`)
+
+var rabbitmq_connection *amqp.Connection
+var rabbitmq_channel *amqp.Channel
+var rabbitmq_queue amqp.Queue
 
 const SET_INSTRUCTION = "set"
 const GET_INSTRUCTION = "get"
@@ -37,6 +42,11 @@ const PEERS_CONNECTION_WAITING_TIME = 5 * time.Second
 const PEERS_CONNECTION_RETRIES = 5
 const SERVER_ADDRESS = "127.0.0.1"
 const SERVER_PORT = 8080
+const RABBITMQ_HOST = "127.0.0.1"
+const RABBITMQ_PORT = 5672
+const RABBITMQ_USER = "guest"
+const RABBITMQ_PASSWORD  = "guest"
+const RABBITMQ_EXCHANGE = "vitamin"
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_RECORD_NOT_FOUND = "Record not found"
@@ -64,6 +74,13 @@ type Record struct {
 func main() {
 	go garbageCollector()
 
+	rabbitmqSetup()
+
+	defer rabbitmq_connection.Close()
+	defer rabbitmq_channel.Close()
+
+	go rabbitmqConsumer()
+
 	listener, err := net.Listen("tcp", socketAddress(SERVER_ADDRESS, SERVER_PORT))
 
 	if err != nil {
@@ -82,8 +99,75 @@ func main() {
 
 }
 
+func rabbitmqNetworkAddress() (string) {
+	return fmt.Sprintf("amqp://%s:%s@%s:%d", RABBITMQ_USER, RABBITMQ_PASSWORD, RABBITMQ_HOST, RABBITMQ_PORT)
+}
+
+func rabbitmqSetup() {
+	var err error
+
+	rabbitmq_connection, err = amqp.Dial(rabbitmqNetworkAddress())
+  failOnError(err, fmt.Sprintf("Failed to connect to RabbitMQ: %s", rabbitmqNetworkAddress()))
+
+  rabbitmq_channel, err = rabbitmq_connection.Channel()
+  failOnError(err, "Failed to open a channel")
+
+  err = rabbitmq_channel.ExchangeDeclare(
+          RABBITMQ_EXCHANGE,   // name
+          "fanout", // type
+          true,     // durable
+          false,    // auto-deleted
+          false,    // internal
+          false,    // no-wait
+          nil,      // arguments
+  )
+  failOnError(err, "Failed to declare an exchange")  
+
+  rabbitmq_queue, err = rabbitmq_channel.QueueDeclare(
+          "",    // name
+          false, // durable
+          false, // delete when unused
+          true,  // exclusive
+          false, // no-wait
+          nil,   // arguments
+  )
+  failOnError(err, "Failed to declare a queue")
+
+  err = rabbitmq_channel.QueueBind(
+          rabbitmq_queue.Name, // queue name
+          "",     // routing key
+          RABBITMQ_EXCHANGE, // exchange
+          false,
+          nil,
+  )
+  failOnError(err, "Failed to bind a queue")
+}
+
+func rabbitmqConsumer() {
+  messages, err := rabbitmq_channel.Consume(
+          rabbitmq_queue.Name, // queue
+          "",     // consumer
+          true,   // auto-ack
+          false,  // exclusive
+          false,  // no-local
+          false,  // no-wait
+          nil,    // args
+  )
+  failOnError(err, "Failed to register a consumer")	
+
+  for message := range messages {
+    log.Printf(" [x] New message: %s", message.Body)
+  }
+}
+
 func socketAddress(host string, port int) string {
 	return SERVER_ADDRESS + ":" + strconv.Itoa(SERVER_PORT)
+}
+
+func failOnError(err error, msg string) {
+  if err != nil {
+    log.Fatalf("%s: %s", msg, err)
+  }
 }
 
 func handleConn(c net.Conn) {
