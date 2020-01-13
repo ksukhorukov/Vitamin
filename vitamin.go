@@ -23,6 +23,7 @@ var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 var network_get_regexp = regexp.MustCompile(`^network_get\(\"(\w+)\"\)$`)
 var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
+var network_set_request_regexp  = regexp.MustCompile(`broadcast_set\(\"(.*)\",\"(.*)\",(\d+),(\d+)\)$`)
 var response_error_regexp =  regexp.MustCompile(`^Error: (.+)$`)
 
 var rabbitmq_connection *amqp.Connection
@@ -30,6 +31,7 @@ var rabbitmq_channel *amqp.Channel
 var rabbitmq_queue amqp.Queue
 
 const SET_INSTRUCTION = "set"
+const SET_BROADCAST_INSTRUCTON = "broadcast_set"
 const GET_INSTRUCTION = "get"
 const NETWORK_GET_INSTRUCTION = "network_get"
 const NETWORK_GET_SUCCESS_RESPONSE = "network_get_response"
@@ -144,6 +146,9 @@ func rabbitmqSetup() {
 }
 
 func rabbitmqConsumer() {
+	var cmd Command
+	var err error
+
   messages, err := rabbitmq_channel.Consume(
           rabbitmq_queue.Name, // queue
           "",     // consumer
@@ -155,9 +160,24 @@ func rabbitmqConsumer() {
   )
   failOnError(err, "Failed to register a consumer")	
 
-  for message := range messages {
-    log.Printf(" [x] New message: %s", message.Body)
+  forever := make(chan bool)
+
+  for {
+	  for message := range messages {
+	    log.Printf(" [x] New message: %s", message.Body)
+	    cmd, err = parseCommand(string(message.Body))
+
+	    if err != nil {
+	    	fmt.Printf("command: %s. parsing failed.", string(message.Body))
+	    	continue
+	    } else {
+	    	executeCommand(&cmd)	
+	    	fmt.Printf("command from consumer was executed\n")
+	    }
+	  }  	
   }
+
+  <-forever
 }
 
 func socketAddress(host string, port int) string {
@@ -226,7 +246,10 @@ func executeCommand(cmd *Command) (string, error) {
 
 	fmt.Printf("executing command %s\n", cmd.instruction)
 	if cmd.instruction == SET_INSTRUCTION {
-		result, err = set(cmd)
+		result, err = set(cmd, true)
+	} else if cmd.instruction == SET_BROADCAST_INSTRUCTON {
+		fmt.Printf("network set instruction received\n")
+		result, err = set(cmd, false)
 	} else if cmd.instruction == GET_INSTRUCTION {
 		result, err = get(cmd)
 	} else if cmd.instruction == NETWORK_GET_INSTRUCTION {
@@ -337,26 +360,24 @@ func broadcastGet(cmd *Command) (string, error) {
 	return result, fmt.Errorf(ERROR_RECORD_NOT_FOUND)
 }
 
-func findLatestRecord(records []Record) (Record, error) {
-	var result Record
-	var err error
+func broadcastSet(cmd *Command) {
+	message := fmt.Sprintf("%s(%s,%s,%d,%d)", SET_BROADCAST_INSTRUCTON, cmd.key, cmd.value, cmd.ttl, cmd.timestamp)
 
-	if len(records) == 0 {
-		return result, fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)		
-	}
+  err := rabbitmq_channel.Publish(
+          RABBITMQ_EXCHANGE, // exchange
+          "",     // routing key
+          false,  // mandatory
+          false,  // immediate
+          amqp.Publishing{
+                  ContentType: "text/plain",
+                  Body:        []byte(message),
+          })
+  failOnError(err, "Failed to publish a message")
 
-	result = records[0]
-
-	for _, record := range(records) {
-		if record.timestamp >  result.timestamp {
-			result = record
-		}
-	}
-
-	return result, err
+  log.Printf(" [x] Sent %s", message)	
 }
 
-func set(cmd *Command) (string, error) {
+func set(cmd *Command, distribute bool) (string, error) {
 	var record Record
 	var key string
 	var err error
@@ -381,6 +402,10 @@ func set(cmd *Command) (string, error) {
 
 	fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
+	if distribute {
+		go broadcastSet(cmd)	
+	}
+	
 	return record.value, err
 }
 
@@ -434,11 +459,14 @@ func parseCommand(msg string) (Command, error) {
 	matched_netowork_get := network_get_regexp.Match([]byte(msg))
 	matched_network_get_response := network_get_success_response_regexp.Match([]byte(msg))
 	matched_response_error := response_error_regexp.Match([]byte(msg))
+	matched_network_set_request := network_set_request_regexp.Match([]byte(msg))
 
 	fmt.Printf("parse command. message: %s\n", msg)
 
 	if matched_set {
 		err = formCommand(msg, SET_INSTRUCTION, &cmd, set_regexp)
+	} else if matched_network_set_request {
+		err = formCommand(msg, SET_BROADCAST_INSTRUCTON,&cmd, network_set_request_regexp)
 	} else if matched_get {
 		err = formCommand(msg, GET_INSTRUCTION, &cmd, get_regexp)
 	} else if matched_netowork_get {
@@ -465,7 +493,7 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 
 	fmt.Printf("form command. %s\n", cmd.instruction)
 
-	if instruction != NETWORK_GET_INSTRUCTION  && instruction != NETWORK_GET_SUCCESS_RESPONSE {
+	if instruction != NETWORK_GET_INSTRUCTION  && instruction != NETWORK_GET_SUCCESS_RESPONSE && instruction != SET_BROADCAST_INSTRUCTON {
 		cmd.key = fmt.Sprintf("%x",sha256.Sum256([]byte(strings.TrimSpace(match[1]))))
 	} else if instruction == NETWORK_GET_INSTRUCTION {
 		//cmd.key = [32]byte(match[1])
@@ -490,6 +518,11 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 			return fmt.Errorf("%s", ERROR_TTL_NON_INTEGER)
 		}
 		// fmt.Printf("form command. %s. %s = %s\n", cmd.instruction, cmd.key, cmd.value)
+	} else if instruction == SET_BROADCAST_INSTRUCTON {
+		cmd.key = match[1]
+		cmd.value = match[2]
+		cmd.timestamp, err = strconv.ParseInt(match[3], 10, 64)
+		cmd.ttl, err = strconv.ParseInt(match[4], 10, 64)
 	}
 
 	return err
