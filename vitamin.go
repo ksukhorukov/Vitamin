@@ -360,8 +360,8 @@ func broadcastGet(cmd *Command) (string, error) {
 	return result, fmt.Errorf(ERROR_RECORD_NOT_FOUND)
 }
 
-func broadcastSet(cmd *Command) {
-	message := fmt.Sprintf("%s(%s,%s,%d,%d)", SET_BROADCAST_INSTRUCTON, cmd.key, cmd.value, cmd.ttl, cmd.timestamp)
+func broadcastSet(record Record, key string) {
+	message := fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d)", SET_BROADCAST_INSTRUCTON, key, record.value, record.ttl, record.timestamp)
 
   err := rabbitmq_channel.Publish(
           RABBITMQ_EXCHANGE, // exchange
@@ -383,6 +383,10 @@ func set(cmd *Command, distribute bool) (string, error) {
 	var err error
 	var size int64
 
+	if recordExist(record, key) {
+		return cmd.value, err
+	}
+
 	size = int64(len(cmd.value) + len(cmd.key))
 
 	if memoryOveruse(mcounter + size) {
@@ -403,10 +407,24 @@ func set(cmd *Command, distribute bool) (string, error) {
 	fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
 	if distribute {
-		go broadcastSet(cmd)	
+		go broadcastSet(record, cmd.key)	
 	}
 	
 	return record.value, err
+}
+
+func recordExist(record Record, key string) (bool) {
+	result, ok := storage[key]
+
+	if !ok {
+		return false
+	}
+
+	if (record.timestamp > result.timestamp) && (record.ttl >= result.timestamp) {
+		return false
+	}
+
+	return true
 }
 
 func memoryOveruse(size int64) bool {
