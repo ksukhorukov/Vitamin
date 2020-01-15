@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"os"
+	"flag"
 	"github.com/streadway/amqp"
 )
 
@@ -38,17 +40,26 @@ const NETWORK_GET_SUCCESS_RESPONSE = "network_get_response"
 
 const HASH_SIZE = sha256.Size
 
-const MEMORY_LIMIT = 1024 * 1024 //1kb
+const DEFAULT_MEMORY_LIMIT = 200//200mb
 const GC_WAITING_TIME = 1 * time.Second
-const PEERS_CONNECTION_WAITING_TIME = 5 * time.Second
-const PEERS_CONNECTION_RETRIES = 5
-const SERVER_ADDRESS = "127.0.0.1"
-const SERVER_PORT = 8080
-const RABBITMQ_HOST = "127.0.0.1"
-const RABBITMQ_PORT = 5672
-const RABBITMQ_USER = "guest"
-const RABBITMQ_PASSWORD  = "guest"
-const RABBITMQ_EXCHANGE = "vitamin"
+
+const DEFAULT_SERVER_ADDRESS = "127.0.0.1"
+const DEFAULT_SERVER_PORT = 8080
+const DEFAULT_RABBITMQ_HOST = "127.0.0.1"
+const DEFAULT_RABBITMQ_PORT = 5672
+const DEFAULT_RABBITMQ_USER = "guest"
+const DEFAULT_RABBITMQ_PASSWORD  = "guest"
+const DEFAULT_RABBITMQ_EXCHANGE = "vitamin"
+
+var server_address string
+var server_port int
+var memory_limit int
+var rabbitmq_host string
+var rabbitmq_port int
+var rabbitmq_user string
+var rabbitmq_password string
+var rabbitmq_exchange string
+var show_help bool
 
 const ERROR_UNRECOGNIZED_COMMAND = "Unrecognized command"
 const ERROR_RECORD_NOT_FOUND = "Record not found"
@@ -74,16 +85,22 @@ type Record struct {
 }
 
 func main() {
-	go garbageCollector()
+	systemParams()
+	
+	if show_help {
+		usage()
+		os.Exit(1)
+	}
 
 	rabbitmqSetup()
 
 	defer rabbitmq_connection.Close()
 	defer rabbitmq_channel.Close()
 
+	go garbageCollector()
 	go rabbitmqConsumer()
 
-	listener, err := net.Listen("tcp", socketAddress(SERVER_ADDRESS, SERVER_PORT))
+	listener, err := net.Listen("tcp", socketAddress(server_address, server_port))
 
 	if err != nil {
 		log.Fatal(err)
@@ -101,8 +118,40 @@ func main() {
 
 }
 
+func systemParams() {
+
+	flag.StringVar(&server_address, "host", DEFAULT_SERVER_ADDRESS, "Address of our server")
+	flag.IntVar(&server_port, "port", DEFAULT_SERVER_PORT, "Port number of our server")
+	flag.IntVar(&memory_limit, "memory", DEFAULT_MEMORY_LIMIT, "Limit of memory allocation for our server")
+	flag.StringVar(&rabbitmq_host, "rabbitmq_host", DEFAULT_RABBITMQ_HOST, "Address of our RabbitMQ server")
+	flag.IntVar(&rabbitmq_port, "rabbitmq_port", DEFAULT_RABBITMQ_PORT, "RabbitMQ server port number")
+	flag.StringVar(&rabbitmq_user, "rabbitmq_user", DEFAULT_RABBITMQ_USER, "RabbitMQ user")
+	flag.StringVar(&rabbitmq_password, "rabbitmq_password", DEFAULT_RABBITMQ_PASSWORD, "RabbitMQ password")
+	flag.StringVar(&rabbitmq_exchange, "rabbitmq_exchange", DEFAULT_RABBITMQ_PASSWORD, "RabbitMQ exchange name")
+	flag.BoolVar(&show_help, "help", false, "Help center")
+
+	flag.Parse()
+
+	memory_limit = 1024 * 1024 * memory_limit
+}
+
+func usage() {
+	fmt.Printf("Usage:\n\n")
+	fmt.Printf("%s --host=192.168.0.101 --port=8080 --memory=200 --rabbitmq_host=192.168.0.100 --rabbitmq_port=5672 --rabbitmq_user=guest --rabbitmq_password=guest --rabbitmq_exchange=vitamin\n\n", os.Args[0])
+
+	fmt.Printf("Default settings:\n\n")
+	fmt.Printf("Host: %s\n", DEFAULT_SERVER_ADDRESS)
+	fmt.Printf("Port: %d\n", DEFAULT_SERVER_PORT)
+	fmt.Printf("Memory: %dmb\n", DEFAULT_MEMORY_LIMIT)
+	fmt.Printf("RabbitMQ host: %s\n", DEFAULT_RABBITMQ_HOST)
+	fmt.Printf("RabbitMQ port: %d\n", DEFAULT_RABBITMQ_PORT)
+	fmt.Printf("RabbitMQ user: %s\n", DEFAULT_RABBITMQ_USER)
+	fmt.Printf("RabbitMQ password: %s\n", DEFAULT_RABBITMQ_PASSWORD)
+	fmt.Printf("RabbitMQ exchange: %s\n\n", DEFAULT_RABBITMQ_EXCHANGE)
+}
+
 func rabbitmqNetworkAddress() (string) {
-	return fmt.Sprintf("amqp://%s:%s@%s:%d", RABBITMQ_USER, RABBITMQ_PASSWORD, RABBITMQ_HOST, RABBITMQ_PORT)
+	return fmt.Sprintf("amqp://%s:%s@%s:%d", rabbitmq_user, rabbitmq_password, rabbitmq_host, rabbitmq_port)
 }
 
 func rabbitmqSetup() {
@@ -115,7 +164,7 @@ func rabbitmqSetup() {
   failOnError(err, "Failed to open a channel")
 
   err = rabbitmq_channel.ExchangeDeclare(
-          RABBITMQ_EXCHANGE,   // name
+          rabbitmq_exchange,   // name
           "fanout", // type
           true,     // durable
           false,    // auto-deleted
@@ -138,7 +187,7 @@ func rabbitmqSetup() {
   err = rabbitmq_channel.QueueBind(
           rabbitmq_queue.Name, // queue name
           "",     // routing key
-          RABBITMQ_EXCHANGE, // exchange
+          rabbitmq_exchange, // exchange
           false,
           nil,
   )
@@ -181,7 +230,7 @@ func rabbitmqConsumer() {
 }
 
 func socketAddress(host string, port int) string {
-	return SERVER_ADDRESS + ":" + strconv.Itoa(SERVER_PORT)
+	return fmt.Sprintf("%s:%s", server_address, strconv.Itoa(port))
 }
 
 func failOnError(err error, msg string) {
@@ -217,7 +266,7 @@ func handleConn(c net.Conn) {
 }
 
 func garbageCollector() {
-	paretto := float64(MEMORY_LIMIT * 0.8)
+	paretto := float64(float64(memory_limit) * 0.8)
 
 	for {
 		if mcounter >= int64(paretto) {
@@ -364,7 +413,7 @@ func broadcastSet(record Record, key string) {
 	message := fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d)", SET_BROADCAST_INSTRUCTON, key, record.value, record.ttl, record.timestamp)
 
   err := rabbitmq_channel.Publish(
-          RABBITMQ_EXCHANGE, // exchange
+          rabbitmq_exchange, // exchange
           "",     // routing key
           false,  // mandatory
           false,  // immediate
@@ -428,7 +477,7 @@ func recordExist(record Record, key string) (bool) {
 }
 
 func memoryOveruse(size int64) bool {
-	return size > MEMORY_LIMIT
+	return size > int64(memory_limit)
 }
 
 func get(cmd *Command) (string, error) {
