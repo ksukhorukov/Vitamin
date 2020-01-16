@@ -13,10 +13,14 @@ import (
 	"unicode"
 	"os"
 	"flag"
+	"sync"
 	"github.com/streadway/amqp"
 )
 
+var storage_mu sync.Mutex
 var storage = make(map[string]Record)
+
+var mcounter_mu sync.Mutex
 var mcounter int64
 
 var peers = []string{ "127.0.0.1:8081" }
@@ -29,6 +33,7 @@ var network_set_request_regexp  = regexp.MustCompile(`broadcast_set\(\"(.*)\",\"
 var response_error_regexp =  regexp.MustCompile(`^Error: (.+)$`)
 
 var rabbitmq_connection *amqp.Connection
+var rabbitmq_channel_mu sync.Mutex
 var rabbitmq_channel *amqp.Channel
 var rabbitmq_queue amqp.Queue
 
@@ -82,6 +87,7 @@ type Record struct {
 	size      int64
 	timestamp int64
 	ttl       int64
+	mu 				sync.Mutex
 }
 
 func main() {
@@ -275,7 +281,9 @@ func garbageCollector() {
 			for key, record := range storage {
 				if recordExpired(record) {
 					deleteKeyFromStorage(key)
+					mcounter_mu.Lock()
 					mcounter -= record.size
+					mcounter_mu.Unlock()
 				}
 			}
 			// fmt.Printf("GC. cleaned memory: %d\n", mcounter)
@@ -286,7 +294,10 @@ func garbageCollector() {
 }
 
 func recordExpired(record Record) bool {
-	return (record.ttl + record.timestamp) < time.Now().Unix()
+	record.mu.Lock()
+	expired := (record.ttl + record.timestamp) < time.Now().Unix()
+	record.mu.Unlock()
+	return expired
 }
 
 func executeCommand(cmd *Command) (string, error) {
@@ -330,17 +341,23 @@ func networkGetResponse(cmd *Command)  (string, error) {
 	fmt.Printf("networkGetResponse function.\n")
 	fmt.Printf("command: %s %s %d %d %d\n", cmd.key, cmd.value, cmd.size, cmd.timestamp, cmd.ttl)
 
+	record.mu.Lock()
 	record.value = cmd.value
 	record.size = cmd.size 
 	record.timestamp = cmd.timestamp
 	record.ttl = cmd.ttl
+	record.mu.Unlock()
 
 	if recordExpired(record) {
 		fmt.Printf("recordExpired. netwoekGetResponse\n")
+		mcounter_mu.Lock()
 		mcounter -= record.size
+		mcounter_mu.Unlock()
 		err = fmt.Errorf("%s", ERROR_RECORD_EXPIRED)
 	} else {
+		storage_mu.Lock()
 		storage[cmd.key] = record
+		storage_mu.Unlock()
 	}
 
 	return record.value, err
@@ -354,12 +371,16 @@ func networkGet(cmd *Command) (string, error) {
 	fmt.Printf("key: %s\n", cmd.key)
 	fmt.Printf("value: %s\n", storage[cmd.key].value)
 
+	storage_mu.Lock()
 	record, ok := storage[cmd.key]
+	storage_mu.Unlock()
 
 	if ok {
+		record.mu.Lock()
 		fmt.Printf("networkGet. Record found\n")
 		fmt.Printf("Record: %s %s %d %d %d", cmd.key, record.value, record.size, record.timestamp, record.ttl)
 		result = fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)		
+		record.mu.Unlock()		
 	} else {
 		fmt.Printf("networkGet. Error: record not found\n")
 		err = fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)
@@ -412,6 +433,7 @@ func broadcastGet(cmd *Command) (string, error) {
 func broadcastSet(record Record, key string) {
 	message := fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d)", SET_BROADCAST_INSTRUCTON, key, record.value, record.ttl, record.timestamp)
 
+	rabbitmq_channel_mu.Lock()
   err := rabbitmq_channel.Publish(
           rabbitmq_exchange, // exchange
           "",     // routing key
@@ -421,6 +443,7 @@ func broadcastSet(record Record, key string) {
                   ContentType: "text/plain",
                   Body:        []byte(message),
           })
+  rabbitmq_channel_mu.Unlock()
   failOnError(err, "Failed to publish a message")
 
   log.Printf(" [x] Sent %s", message)	
@@ -438,6 +461,7 @@ func set(cmd *Command, distribute bool) (string, error) {
 
 	size = int64(len(cmd.value) + len(cmd.key))
 
+	mcounter_mu.Lock()
 	if memoryOveruse(mcounter + size) {
 		key = cmd.key
 		err = fmt.Errorf("%s", ERROR_MEMORY_OVERUSAGE)
@@ -445,13 +469,16 @@ func set(cmd *Command, distribute bool) (string, error) {
 	} else {
 		mcounter += size
 	}
+	mcounter_mu.Unlock()
 
 	record.value = cmd.value
 	record.timestamp = time.Now().Unix()
 	record.ttl = int64(cmd.ttl)
 	record.size = size
 
+	storage_mu.Lock()
 	storage[cmd.key] = record
+	storage_mu.Unlock()
 
 	fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
@@ -463,11 +490,16 @@ func set(cmd *Command, distribute bool) (string, error) {
 }
 
 func recordExist(record Record, key string) (bool) {
+	storage_mu.Lock()
 	result, ok := storage[key]
+	storage_mu.Unlock()
 
 	if !ok {
 		return false
 	}
+
+	defer result.mu.Unlock()
+	result.mu.Lock()
 
 	if (record.timestamp > result.timestamp) && (record.ttl >= result.timestamp) {
 		return false
@@ -487,7 +519,9 @@ func get(cmd *Command) (string, error) {
 	// fmt.Printf("key: %s\n", cmd.key)
 	// fmt.Printf("value: %s\n", storage[cmd.key].value)
 
+	storage_mu.Lock()
 	record, ok := storage[cmd.key]
+	storage_mu.Unlock()
 
 	if !ok {
 		fmt.Printf("%s\n", "No key in storage")
@@ -500,7 +534,9 @@ func get(cmd *Command) (string, error) {
 		fmt.Printf("recordExpired. Get request\n")
 		deleteKeyFromStorage(cmd.key)
 
+		mcounter_mu.Lock()
 		mcounter -= record.size
+		mcounter_mu.Unlock()
 
 		return cmd.key, fmt.Errorf("%s\n", ERROR_RECORD_EXPIRED)
 	}
@@ -509,7 +545,9 @@ func get(cmd *Command) (string, error) {
 }
 
 func deleteKeyFromStorage(key string) {
+	storage_mu.Lock()
 	delete(storage, key)
+	storage_mu.Unlock()
 }
 
 func parseCommand(msg string) (Command, error) {
