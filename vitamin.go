@@ -3,18 +3,18 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"flag"
 	"fmt"
+	"github.com/streadway/amqp"
 	"log"
 	"net"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
-	"os"
-	"flag"
-	"sync"
-	"github.com/streadway/amqp"
 )
 
 var storage_mu sync.Mutex
@@ -23,14 +23,14 @@ var storage = make(map[string]Record)
 var mcounter_mu sync.Mutex
 var mcounter int64
 
-var peers = []string{ "127.0.0.1:8081" }
+var peers = []string{"127.0.0.1:8081"}
 
 var set_regexp = regexp.MustCompile(`set\(\"(.*)\",\"(.*)\",(\d+)\)$`)
 var get_regexp = regexp.MustCompile(`^get\(\"(.*)\"\)$`)
 var network_get_regexp = regexp.MustCompile(`^network_get\(\"(\w+)\"\)$`)
 var network_get_success_response_regexp = regexp.MustCompile(`^network_get_response\(\"(\w+)\",\"(\w+)\",(\d+),(\d+),(\d+)\)$`)
-var network_set_request_regexp  = regexp.MustCompile(`broadcast_set\(\"(.*)\",\"(.*)\",(\d+),(\d+)\)$`)
-var response_error_regexp =  regexp.MustCompile(`^Error: (.+)$`)
+var network_set_request_regexp = regexp.MustCompile(`broadcast_set\(\"(.*)\",\"(.*)\",(\d+),(\d+)\)$`)
+var response_error_regexp = regexp.MustCompile(`^Error: (.+)$`)
 
 var rabbitmq_connection *amqp.Connection
 var rabbitmq_channel_mu sync.Mutex
@@ -45,7 +45,7 @@ const NETWORK_GET_SUCCESS_RESPONSE = "network_get_response"
 
 const HASH_SIZE = sha256.Size
 
-const DEFAULT_MEMORY_LIMIT = 200//200mb
+const DEFAULT_MEMORY_LIMIT = 200 //200mb
 const GC_WAITING_TIME = 1 * time.Second
 
 const DEFAULT_SERVER_ADDRESS = "127.0.0.1"
@@ -53,7 +53,7 @@ const DEFAULT_SERVER_PORT = 8080
 const DEFAULT_RABBITMQ_HOST = "127.0.0.1"
 const DEFAULT_RABBITMQ_PORT = 5672
 const DEFAULT_RABBITMQ_USER = "guest"
-const DEFAULT_RABBITMQ_PASSWORD  = "guest"
+const DEFAULT_RABBITMQ_PASSWORD = "guest"
 const DEFAULT_RABBITMQ_EXCHANGE = "vitamin"
 
 var server_address string
@@ -77,9 +77,9 @@ type Command struct {
 	instruction string
 	key         string
 	value       string
-	timestamp int64
+	timestamp   int64
 	ttl         int64
-	size 				int64
+	size        int64
 }
 
 type Record struct {
@@ -87,12 +87,12 @@ type Record struct {
 	size      int64
 	timestamp int64
 	ttl       int64
-	mu 				sync.Mutex
+	mu        sync.Mutex
 }
 
 func main() {
 	systemParams()
-	
+
 	if show_help {
 		usage()
 		os.Exit(1)
@@ -156,7 +156,7 @@ func usage() {
 	fmt.Printf("RabbitMQ exchange: %s\n\n", DEFAULT_RABBITMQ_EXCHANGE)
 }
 
-func rabbitmqNetworkAddress() (string) {
+func rabbitmqNetworkAddress() string {
 	return fmt.Sprintf("amqp://%s:%s@%s:%d", rabbitmq_user, rabbitmq_password, rabbitmq_host, rabbitmq_port)
 }
 
@@ -164,75 +164,75 @@ func rabbitmqSetup() {
 	var err error
 
 	rabbitmq_connection, err = amqp.Dial(rabbitmqNetworkAddress())
-  failOnError(err, fmt.Sprintf("Failed to connect to RabbitMQ: %s", rabbitmqNetworkAddress()))
+	failOnError(err, fmt.Sprintf("Failed to connect to RabbitMQ: %s", rabbitmqNetworkAddress()))
 
-  rabbitmq_channel, err = rabbitmq_connection.Channel()
-  failOnError(err, "Failed to open a channel")
+	rabbitmq_channel, err = rabbitmq_connection.Channel()
+	failOnError(err, "Failed to open a channel")
 
-  err = rabbitmq_channel.ExchangeDeclare(
-          rabbitmq_exchange,   // name
-          "fanout", // type
-          true,     // durable
-          false,    // auto-deleted
-          false,    // internal
-          false,    // no-wait
-          nil,      // arguments
-  )
-  failOnError(err, "Failed to declare an exchange")  
+	err = rabbitmq_channel.ExchangeDeclare(
+		rabbitmq_exchange, // name
+		"fanout",          // type
+		true,              // durable
+		false,             // auto-deleted
+		false,             // internal
+		false,             // no-wait
+		nil,               // arguments
+	)
+	failOnError(err, "Failed to declare an exchange")
 
-  rabbitmq_queue, err = rabbitmq_channel.QueueDeclare(
-          "",    // name
-          false, // durable
-          false, // delete when unused
-          true,  // exclusive
-          false, // no-wait
-          nil,   // arguments
-  )
-  failOnError(err, "Failed to declare a queue")
+	rabbitmq_queue, err = rabbitmq_channel.QueueDeclare(
+		"",    // name
+		false, // durable
+		false, // delete when unused
+		true,  // exclusive
+		false, // no-wait
+		nil,   // arguments
+	)
+	failOnError(err, "Failed to declare a queue")
 
-  err = rabbitmq_channel.QueueBind(
-          rabbitmq_queue.Name, // queue name
-          "",     // routing key
-          rabbitmq_exchange, // exchange
-          false,
-          nil,
-  )
-  failOnError(err, "Failed to bind a queue")
+	err = rabbitmq_channel.QueueBind(
+		rabbitmq_queue.Name, // queue name
+		"",                  // routing key
+		rabbitmq_exchange,   // exchange
+		false,
+		nil,
+	)
+	failOnError(err, "Failed to bind a queue")
 }
 
 func rabbitmqConsumer() {
 	var cmd Command
 	var err error
 
-  messages, err := rabbitmq_channel.Consume(
-          rabbitmq_queue.Name, // queue
-          "",     // consumer
-          true,   // auto-ack
-          false,  // exclusive
-          false,  // no-local
-          false,  // no-wait
-          nil,    // args
-  )
-  failOnError(err, "Failed to register a consumer")	
+	messages, err := rabbitmq_channel.Consume(
+		rabbitmq_queue.Name, // queue
+		"",                  // consumer
+		true,                // auto-ack
+		false,               // exclusive
+		false,               // no-local
+		false,               // no-wait
+		nil,                 // args
+	)
+	failOnError(err, "Failed to register a consumer")
 
-  forever := make(chan bool)
+	forever := make(chan bool)
 
-  for {
-	  for message := range messages {
-	    log.Printf(" [x] New message: %s", message.Body)
-	    cmd, err = parseCommand(string(message.Body))
+	for {
+		for message := range messages {
+			log.Printf(" [x] New message: %s", message.Body)
+			cmd, err = parseCommand(string(message.Body))
 
-	    if err != nil {
-	    	fmt.Printf("command: %s. parsing failed.", string(message.Body))
-	    	continue
-	    } else {
-	    	executeCommand(&cmd)	
-	    	fmt.Printf("command from consumer was executed\n")
-	    }
-	  }  	
-  }
+			if err != nil {
+				fmt.Printf("command: %s. parsing failed.", string(message.Body))
+				continue
+			} else {
+				executeCommand(&cmd)
+				fmt.Printf("command from consumer was executed\n")
+			}
+		}
+	}
 
-  <-forever
+	<-forever
 }
 
 func socketAddress(host string, port int) string {
@@ -240,9 +240,9 @@ func socketAddress(host string, port int) string {
 }
 
 func failOnError(err error, msg string) {
-  if err != nil {
-    log.Fatalf("%s: %s", msg, err)
-  }
+	if err != nil {
+		log.Fatalf("%s: %s", msg, err)
+	}
 }
 
 func handleConn(c net.Conn) {
@@ -334,7 +334,7 @@ func connectPeer(socket string) (net.Conn, error) {
 	return conn, err
 }
 
-func networkGetResponse(cmd *Command)  (string, error) {
+func networkGetResponse(cmd *Command) (string, error) {
 	var err error
 	var record Record
 
@@ -343,7 +343,7 @@ func networkGetResponse(cmd *Command)  (string, error) {
 
 	record.mu.Lock()
 	record.value = cmd.value
-	record.size = cmd.size 
+	record.size = cmd.size
 	record.timestamp = cmd.timestamp
 	record.ttl = cmd.ttl
 	record.mu.Unlock()
@@ -379,8 +379,8 @@ func networkGet(cmd *Command) (string, error) {
 		record.mu.Lock()
 		fmt.Printf("networkGet. Record found\n")
 		fmt.Printf("Record: %s %s %d %d %d", cmd.key, record.value, record.size, record.timestamp, record.ttl)
-		result = fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)		
-		record.mu.Unlock()		
+		result = fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d,%d)\n", NETWORK_GET_SUCCESS_RESPONSE, cmd.key, record.value, record.size, record.timestamp, record.ttl)
+		record.mu.Unlock()
 	} else {
 		fmt.Printf("networkGet. Error: record not found\n")
 		err = fmt.Errorf("%s", ERROR_RECORD_NOT_FOUND)
@@ -395,8 +395,8 @@ func broadcastGet(cmd *Command) (string, error) {
 	var connection net.Conn
 	var broadcast_get_response_cmd Command
 
-	fmt.Printf("%s\n","Starting broadcast")
-	for _, socket := range(peers) {
+	fmt.Printf("%s\n", "Starting broadcast")
+	for _, socket := range peers {
 		connection, error = connectPeer(socket)
 
 		if error != nil {
@@ -426,7 +426,7 @@ func broadcastGet(cmd *Command) (string, error) {
 
 		result, error = "", nil
 	}
-	
+
 	return result, fmt.Errorf(ERROR_RECORD_NOT_FOUND)
 }
 
@@ -434,19 +434,19 @@ func broadcastSet(record Record, key string) {
 	message := fmt.Sprintf("%s(\"%s\",\"%s\",%d,%d)", SET_BROADCAST_INSTRUCTON, key, record.value, record.ttl, record.timestamp)
 
 	rabbitmq_channel_mu.Lock()
-  err := rabbitmq_channel.Publish(
-          rabbitmq_exchange, // exchange
-          "",     // routing key
-          false,  // mandatory
-          false,  // immediate
-          amqp.Publishing{
-                  ContentType: "text/plain",
-                  Body:        []byte(message),
-          })
-  rabbitmq_channel_mu.Unlock()
-  failOnError(err, "Failed to publish a message")
+	err := rabbitmq_channel.Publish(
+		rabbitmq_exchange, // exchange
+		"",                // routing key
+		false,             // mandatory
+		false,             // immediate
+		amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(message),
+		})
+	rabbitmq_channel_mu.Unlock()
+	failOnError(err, "Failed to publish a message")
 
-  log.Printf(" [x] Sent %s", message)	
+	log.Printf(" [x] Sent %s", message)
 }
 
 func set(cmd *Command, distribute bool) (string, error) {
@@ -483,13 +483,13 @@ func set(cmd *Command, distribute bool) (string, error) {
 	fmt.Printf("set command. %s = %s\n", cmd.key, storage[cmd.key].value)
 
 	if distribute {
-		go broadcastSet(record, cmd.key)	
+		go broadcastSet(record, cmd.key)
 	}
-	
+
 	return record.value, err
 }
 
-func recordExist(record Record, key string) (bool) {
+func recordExist(record Record, key string) bool {
 	storage_mu.Lock()
 	result, ok := storage[key]
 	storage_mu.Unlock()
@@ -528,7 +528,7 @@ func get(cmd *Command) (string, error) {
 		fmt.Printf("%s\n", "Starting broadcast")
 		return broadcastGet(cmd)
 	}
-		
+
 	if recordExpired(record) {
 		// cache invalidation. step 1.
 		fmt.Printf("recordExpired. Get request\n")
@@ -571,7 +571,7 @@ func parseCommand(msg string) (Command, error) {
 	if matched_set {
 		err = formCommand(msg, SET_INSTRUCTION, &cmd, set_regexp)
 	} else if matched_network_set_request {
-		err = formCommand(msg, SET_BROADCAST_INSTRUCTON,&cmd, network_set_request_regexp)
+		err = formCommand(msg, SET_BROADCAST_INSTRUCTON, &cmd, network_set_request_regexp)
 	} else if matched_get {
 		err = formCommand(msg, GET_INSTRUCTION, &cmd, get_regexp)
 	} else if matched_netowork_get {
@@ -598,8 +598,8 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 
 	fmt.Printf("form command. %s\n", cmd.instruction)
 
-	if instruction != NETWORK_GET_INSTRUCTION  && instruction != NETWORK_GET_SUCCESS_RESPONSE && instruction != SET_BROADCAST_INSTRUCTON {
-		cmd.key = fmt.Sprintf("%x",sha256.Sum256([]byte(strings.TrimSpace(match[1]))))
+	if instruction != NETWORK_GET_INSTRUCTION && instruction != NETWORK_GET_SUCCESS_RESPONSE && instruction != SET_BROADCAST_INSTRUCTON {
+		cmd.key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(match[1]))))
 	} else if instruction == NETWORK_GET_INSTRUCTION {
 		//cmd.key = [32]byte(match[1])
 		fmt.Printf("form command. network_get instruction\n")
@@ -609,12 +609,12 @@ func formCommand(msg string, instruction string, cmd *Command, pattern *regexp.R
 		fmt.Printf("form command. network_get_success_response\n")
 		cmd.key = match[1]
 		cmd.value = match[2]
-		cmd.size, err =   strconv.ParseInt(match[3], 10, 64)
+		cmd.size, err = strconv.ParseInt(match[3], 10, 64)
 		cmd.timestamp, err = strconv.ParseInt(match[4], 10, 64)
 		cmd.ttl, err = strconv.ParseInt(match[5], 10, 64)
 
 	}
-	
+
 	if instruction == SET_INSTRUCTION {
 		cmd.value = strings.TrimSpace(match[2])
 		cmd.ttl, err = strconv.ParseInt(strings.TrimSpace(match[3]), 10, 64)
