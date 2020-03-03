@@ -77,6 +77,7 @@ Run load-balancer (192.168.10.13):
 ```
 
 For now all request to load-balancer (192.168.10.13:8080) will be evenly distributed across cache servers.
+You don't need to think about replication it comes with Vitamin out of the box.
 
 ## Help
 
