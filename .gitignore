@@ -5,4 +5,4 @@
 ./receive_logs.go
 ./emit_log
 ./receive_logs
-build.sh
+./build.sh
