@@ -44,7 +44,7 @@ Let's suppose we have four severs: vitamin_first_node (192.168.10.10), vitamin_s
 
 For the sace of simplicity we will use HAProxy for load balancing.  Example configuration can be found [here](https://github.com/ksukhorukov/Vitamin/blob/master/haproxy/haproxy.cfg)
 
-![](https://github.com/ksukhorukov/Vitamin/raw/master/images/cache_servers_infr.png)
+![](https://github.com/ksukhorukov/Vitamin/raw/master/images/network.png)
 
 Run RabbitMQ(192.168.10.12):
 
