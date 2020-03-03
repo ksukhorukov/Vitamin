@@ -62,13 +62,13 @@ Run second server (192.168.10.11):
 ./vitamin --rabbitmq_host=192.168.0.12 --rabbitmq_port=5672 --rabbitmq_user=guest --rabbitmq_password=guest --rabbitmq_exchange=vitamin
 ```
 
-Run Nth server (192.168.10.<N>):
+Run Nth server (192.168.10.N):
 
 ```bash
-./vitamin --rabbitmq_host=192.168.0.<N> --rabbitmq_port=5672 --rabbitmq_user=guest --rabbitmq_password=guest --rabbitmq_exchange=vitamin
+./vitamin --rabbitmq_host=192.168.0.N --rabbitmq_port=5672 --rabbitmq_user=guest --rabbitmq_password=guest --rabbitmq_exchange=vitamin
 ```
 
-Do not forget to replace 192.168.10.<N> to real ip of your Nth server.
+Do not forget to replace 192.168.10.N to real ip of your Nth server.
 
 Run load-balancer (192.168.10.13):
 
